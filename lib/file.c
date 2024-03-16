@@ -411,7 +411,9 @@ out:
  * a temporary char * buffer with the full list, with entries separated
  * by \n, for file_do().
  */
-static CURLcode directory_list(struct FILEPROTO *file, char **data, curl_off_t *size) {
+static CURLcode directory_list(struct FILEPROTO *file, char **data,
+                               curl_off_t *size)
+{
   CURLcode result = CURLE_OK;
   DIR *dir;
   struct dirent *entry;
@@ -431,7 +433,7 @@ static CURLcode directory_list(struct FILEPROTO *file, char **data, curl_off_t *
     goto out;
   }
 
-  while((entry = readdir(dir)) != NULL) {
+  while(entry = readdir(dir)) {
     if(entry->d_name && entry->d_name[0] != '.') {
       char *tmp;
       /* Add one for \n */
@@ -444,7 +446,7 @@ static CURLcode directory_list(struct FILEPROTO *file, char **data, curl_off_t *
       }
 
       *data = tmp;
-      snprintf(*data + *size, entry_len + 1, "%s\n", entry->d_name);
+      curl_msnprintf(*data + *size, entry_len + 1, "%s\n", entry->d_name);
       *size += entry_len;
     }
   }
@@ -651,7 +653,9 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
       nread = read(fd, xfer_buf, bytestoread);
     }
     else {
-      memcpy(xfer_buf, directory_data + already_read + data->state.resume_from, bytestoread);
+      memcpy(xfer_buf,
+             directory_data + already_read + data->state.resume_from,
+             bytestoread);
       nread = bytestoread;
       already_read += nread;
     }
