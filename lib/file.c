@@ -420,25 +420,25 @@ static CURLcode directory_list(struct FILEPROTO *file, char **data, curl_off_t *
   *data = NULL;
   *size = 0;
 
-  if (file == NULL) {
+  if(!file) {
     result = CURLE_BAD_FUNCTION_ARGUMENT;
     goto out;
   }
 
   dir = fdopendir(file->fd);
-  if (dir == NULL) {
+  if(!dir) {
     result = CURLE_BAD_FUNCTION_ARGUMENT;
     goto out;
   }
 
   while((entry = readdir(dir)) != NULL) {
-    if (entry->d_name != NULL && entry->d_name[0] != '.') {
+    if(entry->d_name && entry->d_name[0] != '.') {
       char *tmp;
       /* Add one for \n */
       entry_len = strlen(entry->d_name) + 1;
       /* Add one for \0 */
       tmp = realloc(*data, *size + entry_len + 1);
-      if (tmp == NULL) {
+      if(!tmp) {
         result = CURLE_OUT_OF_MEMORY;
         goto out;
       }
@@ -450,14 +450,14 @@ static CURLcode directory_list(struct FILEPROTO *file, char **data, curl_off_t *
   }
 
 out:
-  if (result != CURLE_OK) {
-    if (*data != NULL)
+  if(result != CURLE_OK) {
+    if(*data)
       free(*data);
     *data = NULL;
     *size = 0;
   }
 
-  if (dir != NULL) {
+  if(dir) {
     closedir(dir);
   }
 
@@ -508,9 +508,10 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
   if(-1 != fstat(fd, &statbuf)) {
     if(!S_ISDIR(statbuf.st_mode)) {
       expected_size = statbuf.st_size;
-    } else {
+    }
+    else {
       result = directory_list(file, &directory_data, &expected_size);
-      if (result != CURLE_OK) {
+      if(result != CURLE_OK) {
         *done = TRUE;
         return result;
       }
@@ -618,11 +619,12 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
 
   if(data->state.resume_from) {
     if(!S_ISDIR(statbuf.st_mode)) {
-      if (data->state.resume_from !=
+      if(data->state.resume_from !=
           lseek(fd, data->state.resume_from, SEEK_SET))
         return CURLE_BAD_DOWNLOAD_RESUME;
-    } else {
-      if (directory_data == NULL ||
+    }
+    else {
+      if(!directory_data ||
           data->state.resume_from < 0 ||
           data->state.resume_from > (curl_off_t)strlen(directory_data))
         return CURLE_BAD_DOWNLOAD_RESUME;
@@ -645,9 +647,10 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
     else
       bytestoread = xfer_blen-1;
 
-    if (!S_ISDIR(statbuf.st_mode)) {
+    if(!S_ISDIR(statbuf.st_mode)) {
       nread = read(fd, xfer_buf, bytestoread);
-    } else {
+    }
+    else {
       memcpy(xfer_buf, directory_data + already_read + data->state.resume_from, bytestoread);
       nread = bytestoread;
       already_read += nread;
@@ -678,7 +681,7 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
 
 out:
   Curl_multi_xfer_buf_release(data, xfer_buf);
-  if (directory_data)
+  if(directory_data)
     free(directory_data);
   return result;
 }
