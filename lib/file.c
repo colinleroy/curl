@@ -623,7 +623,8 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
         return CURLE_BAD_DOWNLOAD_RESUME;
     } else {
       if (directory_data == NULL ||
-          data->state.resume_from > strlen(directory_data))
+          data->state.resume_from < 0 ||
+          data->state.resume_from > (curl_off_t)strlen(directory_data))
         return CURLE_BAD_DOWNLOAD_RESUME;
     }
   }
