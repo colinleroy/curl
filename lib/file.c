@@ -407,66 +407,6 @@ out:
 }
 
 /*
- * directory_list() will read all entries in a directory and prepare
- * a temporary char * buffer with the full list, with entries separated
- * by \n, for file_do().
- */
-static CURLcode directory_list(struct FILEPROTO *file, char **data,
-                               curl_off_t *size)
-{
-  CURLcode result = CURLE_OK;
-  DIR *dir;
-  struct dirent *entry;
-  curl_off_t entry_len;
-
-  *data = NULL;
-  *size = 0;
-
-  if(!file) {
-    result = CURLE_BAD_FUNCTION_ARGUMENT;
-    goto out;
-  }
-
-  dir = fdopendir(file->fd);
-  if(!dir) {
-    result = CURLE_BAD_FUNCTION_ARGUMENT;
-    goto out;
-  }
-
-  while(entry = readdir(dir)) {
-    if(entry->d_name && entry->d_name[0] != '.') {
-      char *tmp;
-      /* Add one for \n */
-      entry_len = strlen(entry->d_name) + 1;
-      /* Add one for \0 */
-      tmp = realloc(*data, *size + entry_len + 1);
-      if(!tmp) {
-        result = CURLE_OUT_OF_MEMORY;
-        goto out;
-      }
-
-      *data = tmp;
-      curl_msnprintf(*data + *size, entry_len + 1, "%s\n", entry->d_name);
-      *size += entry_len;
-    }
-  }
-
-out:
-  if(result != CURLE_OK) {
-    if(*data)
-      free(*data);
-    *data = NULL;
-    *size = 0;
-  }
-
-  if(dir) {
-    closedir(dir);
-  }
-
-  return result;
-}
-
-/*
  * file_do() is the protocol-specific function for the do-phase, separated
  * from the connect-phase above. Other protocols merely setup the transfer in
  * the do-phase, to have it done in the main transfer loop but since some
@@ -491,10 +431,7 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
   int fd;
   struct FILEPROTO *file;
   char *xfer_buf;
-  char *directory_data;
   size_t xfer_blen;
-  /* Keep track of already read directory list */
-  size_t already_read = 0;
 
   *done = TRUE; /* unconditionally */
 
@@ -508,16 +445,8 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
 
   /* VMS: This only works reliable for STREAMLF files */
   if(-1 != fstat(fd, &statbuf)) {
-    if(!S_ISDIR(statbuf.st_mode)) {
+    if(!S_ISDIR(statbuf.st_mode))
       expected_size = statbuf.st_size;
-    }
-    else {
-      result = directory_list(file, &directory_data, &expected_size);
-      if(result != CURLE_OK) {
-        *done = TRUE;
-        return result;
-      }
-    }
     /* and store the modification time */
     data->info.filetime = statbuf.st_mtime;
     fstated = TRUE;
@@ -626,10 +555,7 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
         return CURLE_BAD_DOWNLOAD_RESUME;
     }
     else {
-      if(!directory_data ||
-          data->state.resume_from < 0 ||
-          data->state.resume_from > (curl_off_t)strlen(directory_data))
-        return CURLE_BAD_DOWNLOAD_RESUME;
+      return CURLE_BAD_DOWNLOAD_RESUME;
     }
   }
 
@@ -651,27 +577,43 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
 
     if(!S_ISDIR(statbuf.st_mode)) {
       nread = read(fd, xfer_buf, bytestoread);
+
+      if(nread > 0)
+        xfer_buf[nread] = 0;
+
+      if(nread <= 0 || (size_known && (expected_size == 0)))
+        break;
+
+      if(size_known)
+        expected_size -= nread;
+
+      result = Curl_client_write(data, CLIENTWRITE_BODY, xfer_buf, nread);
+      if(result)
+        goto out;
     }
     else {
-      memcpy(xfer_buf,
-             directory_data + already_read + data->state.resume_from,
-             bytestoread);
-      nread = bytestoread;
-      already_read += nread;
+      DIR *dir = fdopendir(file->fd);
+      struct dirent *entry;
+
+      if(!dir) {
+        result = CURLE_READ_ERROR;
+      }
+      else {
+        while((entry = readdir(dir))) {
+          if(entry->d_name && entry->d_name[0] != '.') {
+            result = Curl_client_write(data, CLIENTWRITE_BODY,
+                     entry->d_name, strlen(entry->d_name));
+            if(result)
+              break;
+            result = Curl_client_write(data, CLIENTWRITE_BODY, "\n", 1);
+            if(result)
+              break;
+          }
+        }
+        closedir(dir);
+        break;
+      }
     }
-
-    if(nread > 0)
-      xfer_buf[nread] = 0;
-
-    if(nread <= 0 || (size_known && (expected_size == 0)))
-      break;
-
-    if(size_known)
-      expected_size -= nread;
-
-    result = Curl_client_write(data, CLIENTWRITE_BODY, xfer_buf, nread);
-    if(result)
-      goto out;
 
     if(Curl_pgrsUpdate(data))
       result = CURLE_ABORTED_BY_CALLBACK;
@@ -685,8 +627,6 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
 
 out:
   Curl_multi_xfer_buf_release(data, xfer_buf);
-  if(directory_data)
-    free(directory_data);
   return result;
 }
 
