@@ -614,12 +614,49 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
           }
         }
         closedir(dir);
+      }
+
+      #elif defined(_WIN32)
+      WIN32_FIND_DATAA entry;
+      HANDLE h;
+      size_t wc_len = strlen(file->path) + strlen("\\*.*") + 1;
+      char *wc = malloc(wc_len);
+
+      if(!wc) {
+        result = CURLE_OUT_OF_MEMORY;
         break;
       }
+
+      if(file->path[strlen(file->path) - 1] == DIRSEP)
+        msnprintf(wc, wc_len, "%s*.*", file->path);
+      else
+        msnprintf(wc, wc_len, "%s%c*.*", file->path, DIRSEP);
+
+      h = FindFirstFileA(wc, &entry);
+      free(wc);
+
+      if(h == INVALID_HANDLE_VALUE) {
+        result = CURLE_READ_ERROR;
+        break;
+      }
+
+      do {
+        result = Curl_client_write(data, CLIENTWRITE_BODY,
+                 entry.cFileName, strlen(entry.cFileName));
+        if(result)
+          break;
+        result = Curl_client_write(data, CLIENTWRITE_BODY, "\n", 1);
+        if(result)
+          break;
+      } while(FindNextFileA(h, &entry));
+
+      FindClose(h);
+
       #else
       result = CURLE_READ_ERROR;
-      break;
       #endif
+
+      break;
     }
 
     if(Curl_pgrsUpdate(data))
