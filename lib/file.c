@@ -54,7 +54,9 @@
 #include <sys/types.h>
 #endif
 
+#ifdef HAVE_DIRENT_H
 #include <dirent.h>
+#endif
 
 #include "strtoofft.h"
 #include "urldata.h"
@@ -592,7 +594,8 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
         goto out;
     }
     else {
-      DIR *dir = fdopendir(file->fd);
+      #ifdef HAVE_OPENDIR
+      DIR *dir = opendir(file->path);
       struct dirent *entry;
 
       if(!dir) {
@@ -613,6 +616,10 @@ static CURLcode file_do(struct Curl_easy *data, bool *done)
         closedir(dir);
         break;
       }
+      #else
+      result = CURLE_READ_ERROR;
+      break;
+      #endif
     }
 
     if(Curl_pgrsUpdate(data))
