@@ -64,6 +64,7 @@
 #define SMB_COM_CLOSE                 0x04
 #define SMB_COM_READ_ANDX             0x2e
 #define SMB_COM_WRITE_ANDX            0x2f
+#define SMB_COM_TRANSACTION2          0x32
 #define SMB_COM_TREE_DISCONNECT       0x71
 #define SMB_COM_NEGOTIATE             0x72
 #define SMB_COM_SETUP_ANDX            0x73
@@ -90,6 +91,11 @@
 #define SMB_FILE_SHARE_ALL            0x07
 #define SMB_FILE_OPEN                 0x01
 #define SMB_FILE_OVERWRITE_IF         0x05
+
+#define SMB_FILE_DIRECTORY_FILE       0x01
+
+#define SMB_TRANS2_FIND_FIRST2        0x0001
+#define SMB_TRANS2_FIND_NEXT2         0x0002
 
 #define SMB_ERR_NOACCESS              0x00050001
 
@@ -360,8 +366,10 @@ static curl_off_t smb_swap64(curl_off_t x)
 enum smb_req_state {
   SMB_REQUESTING,
   SMB_TREE_CONNECT,
-  SMB_OPEN,
-  SMB_DOWNLOAD,
+  SMB_OPEN_AS_DIRECTORY,
+  SMB_OPEN_AS_FILE,
+  SMB_DOWNLOAD_DIRECTORY,
+  SMB_DOWNLOAD_FILE,
   SMB_UPLOAD,
   SMB_CLOSE,
   SMB_TREE_DISCONNECT,
@@ -408,8 +416,10 @@ static void request_state(struct Curl_easy *data,
   static const char * const names[] = {
     "SMB_REQUESTING",
     "SMB_TREE_CONNECT",
-    "SMB_OPEN",
-    "SMB_DOWNLOAD",
+    "SMB_OPEN_AS_DIRECTORY",
+    "SMB_OPEN_AS_FILE",
+    "SMB_DOWNLOAD_DIRECTORY",
+    "SMB_DOWNLOAD_FILE",
     "SMB_UPLOAD",
     "SMB_CLOSE",
     "SMB_TREE_DISCONNECT",
@@ -706,7 +716,7 @@ static CURLcode smb_send_tree_connect(struct Curl_easy *data)
                           sizeof(msg) - sizeof(msg.bytes) + byte_count);
 }
 
-static CURLcode smb_send_open(struct Curl_easy *data)
+static CURLcode smb_send_open_file(struct Curl_easy *data)
 {
   struct smb_request *req = data->req.p.smb;
   struct smb_nt_create msg;
@@ -735,6 +745,32 @@ static CURLcode smb_send_open(struct Curl_easy *data)
                           sizeof(msg) - sizeof(msg.bytes) + byte_count);
 }
 
+static CURLcode smb_send_open_directory(struct Curl_easy *data)
+{
+  struct smb_request *req = data->req.p.smb;
+  struct smb_nt_create msg;
+  const size_t byte_count = strlen(req->path) + 1;
+
+  if(byte_count > sizeof(msg.bytes))
+    return CURLE_FILESIZE_EXCEEDED;
+
+  memset(&msg, 0, sizeof(msg) - sizeof(msg.bytes));
+  msg.word_count = SMB_WC_NT_CREATE_ANDX;
+  msg.andx.command = SMB_COM_NO_ANDX_COMMAND;
+  msg.name_length = smb_swap16((unsigned short)(byte_count - 1));
+  msg.share_access = smb_swap32(SMB_FILE_SHARE_ALL);
+
+  msg.access = smb_swap32(SMB_GENERIC_READ);
+  msg.create_disposition = smb_swap32(SMB_FILE_OPEN);
+  msg.create_options = smb_swap32(SMB_FILE_DIRECTORY_FILE);
+
+  msg.byte_count = smb_swap16((unsigned short) byte_count);
+  strcpy(msg.bytes, req->path);
+
+  return smb_send_message(data, SMB_COM_NT_CREATE_ANDX, &msg,
+                          sizeof(msg) - sizeof(msg.bytes) + byte_count);
+}
+
 static CURLcode smb_send_close(struct Curl_easy *data)
 {
   struct smb_request *req = data->req.p.smb;
@@ -756,7 +792,25 @@ static CURLcode smb_send_tree_disconnect(struct Curl_easy *data)
   return smb_send_message(data, SMB_COM_TREE_DISCONNECT, &msg, sizeof(msg));
 }
 
-static CURLcode smb_send_read(struct Curl_easy *data)
+static CURLcode smb_send_read_file(struct Curl_easy *data)
+{
+  struct smb_request *req = data->req.p.smb;
+  curl_off_t offset = data->req.offset;
+  struct smb_read msg;
+
+  memset(&msg, 0, sizeof(msg));
+  msg.word_count = SMB_WC_READ_ANDX;
+  msg.andx.command = SMB_COM_NO_ANDX_COMMAND;
+  msg.fid = smb_swap16(req->fid);
+  msg.offset = smb_swap32((unsigned int) offset);
+  msg.offset_high = smb_swap32((unsigned int) (offset >> 32));
+  msg.min_bytes = smb_swap16(MAX_PAYLOAD_SIZE);
+  msg.max_bytes = smb_swap16(MAX_PAYLOAD_SIZE);
+
+  return smb_send_message(data, SMB_COM_READ_ANDX, &msg, sizeof(msg));
+}
+
+static CURLcode smb_send_read_directory(struct Curl_easy *data)
 {
   struct smb_request *req = data->req.p.smb;
   curl_off_t offset = data->req.offset;
@@ -989,10 +1043,31 @@ static CURLcode smb_request_state(struct Curl_easy *data, bool *done)
       break;
     }
     req->tid = smb_swap16(h->tid);
-    next_state = SMB_OPEN;
+    next_state = SMB_OPEN_AS_DIRECTORY;
     break;
 
-  case SMB_OPEN:
+  case SMB_OPEN_AS_DIRECTORY:
+    if(h->status || smbc->got < sizeof(struct smb_nt_create_response)) {
+      req->result = CURLE_REMOTE_FILE_NOT_FOUND;
+      if(h->status == smb_swap32(SMB_ERR_NOACCESS)) {
+        req->result = CURLE_REMOTE_ACCESS_DENIED;
+        next_state = SMB_TREE_DISCONNECT;
+      }
+      else {
+        next_state = SMB_OPEN_AS_FILE;
+      }
+      break;
+    }
+    smb_m = (const struct smb_nt_create_response*) msg;
+    req->fid = smb_swap16(smb_m->fid);
+    data->req.offset = 0;
+    printf("dfid is %d\n", req->fid);
+    req->result = CURLE_WEIRD_SERVER_REPLY;
+    next_state = SMB_CLOSE;
+    /* FIXME get directory contents */
+    break;
+
+  case SMB_OPEN_AS_FILE:
     if(h->status || smbc->got < sizeof(struct smb_nt_create_response)) {
       req->result = CURLE_REMOTE_FILE_NOT_FOUND;
       if(h->status == smb_swap32(SMB_ERR_NOACCESS))
@@ -1000,8 +1075,12 @@ static CURLcode smb_request_state(struct Curl_easy *data, bool *done)
       next_state = SMB_TREE_DISCONNECT;
       break;
     }
+    else {
+      req->result = 0;
+    }
     smb_m = (const struct smb_nt_create_response*) msg;
     req->fid = smb_swap16(smb_m->fid);
+    printf("ffid is %d\n", req->fid);
     data->req.offset = 0;
     if(data->state.upload) {
       data->req.size = data->state.infilesize;
@@ -1018,12 +1097,12 @@ static CURLcode smb_request_state(struct Curl_easy *data, bool *done)
         Curl_pgrsSetDownloadSize(data, data->req.size);
         if(data->set.get_filetime)
           get_posix_time(&data->info.filetime, smb_m->last_change_time);
-        next_state = SMB_DOWNLOAD;
+        next_state = SMB_DOWNLOAD_FILE;
       }
     }
     break;
 
-  case SMB_DOWNLOAD:
+  case SMB_DOWNLOAD_FILE:
     if(h->status || smbc->got < sizeof(struct smb_header) + 14) {
       req->result = CURLE_RECV_ERROR;
       next_state = SMB_CLOSE;
@@ -1049,7 +1128,7 @@ static CURLcode smb_request_state(struct Curl_easy *data, bool *done)
       }
     }
     data->req.offset += len;
-    next_state = (len < MAX_PAYLOAD_SIZE) ? SMB_CLOSE : SMB_DOWNLOAD;
+    next_state = (len < MAX_PAYLOAD_SIZE) ? SMB_CLOSE : SMB_DOWNLOAD_FILE;
     break;
 
   case SMB_UPLOAD:
@@ -1086,12 +1165,20 @@ static CURLcode smb_request_state(struct Curl_easy *data, bool *done)
   smb_pop_message(conn);
 
   switch(next_state) {
-  case SMB_OPEN:
-    result = smb_send_open(data);
+  case SMB_OPEN_AS_DIRECTORY:
+    result = smb_send_open_directory(data);
     break;
 
-  case SMB_DOWNLOAD:
-    result = smb_send_read(data);
+  case SMB_OPEN_AS_FILE:
+    result = smb_send_open_file(data);
+    break;
+
+  case SMB_DOWNLOAD_DIRECTORY:
+    result = smb_send_read_directory(data);
+    break;
+
+  case SMB_DOWNLOAD_FILE:
+    result = smb_send_read_file(data);
     break;
 
   case SMB_UPLOAD:
